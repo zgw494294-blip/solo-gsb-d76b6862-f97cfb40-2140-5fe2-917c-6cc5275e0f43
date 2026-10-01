@@ -20,6 +20,7 @@ const state = {
 };
 
 let previewSeq = 0; // 预览请求序号：只采用最后一次发出的预览响应
+let exportSeq = 0; // 下载请求序号：只有仍持有序号的下载才能解除“下载中…”（重新导入即作废旧下载）
 
 const MARKER = /\[\[(?:原(\d+)\?|(\d+))\]\]/g; // 预览文本中的引用形态
 
@@ -173,6 +174,7 @@ $("#reimport-btn").addEventListener("click", () => {
   state.saving = false;
   state.merging = false;
   state.exporting = false;
+  exportSeq += 1; // 旧草稿在途下载立刻失去序号，其收尾不得解除新草稿的“下载中…”
   clauseList.classList.remove("busy");
   desk.hidden = true;
   importPanel.hidden = false;
@@ -586,13 +588,16 @@ function moveClause(srcId, targetId, after) {
 // --------------------------------------------------------------------------- //
 downloadBtn.addEventListener("click", async () => {
   if (downloadBtn.disabled) return; // 预览未追上 / 有失效引用 / 在途时不允许下载
+  // 本次下载独占“下载中…”：序号在每次下载、每次重新导入时前移，
+  // 只有仍持有当前序号的下载才允许在收尾时解除等待，旧下载成功或失败都不能提前解锁
+  const seq = ++exportSeq;
   state.exporting = true;
   syncToolbar();
   const epoch = state.epoch;
   const rev = state.rev;
   try {
     const data = await api("/api/export", snapshot());
-    if (epoch !== state.epoch) return; // 旧草稿的响应：静默丢弃
+    if (seq !== exportSeq || epoch !== state.epoch) return; // 已重新导入：静默丢弃，不保存、不提示、不动按钮
     if (rev !== state.rev) {
       // 等待期间草稿又有改动：下载内容已与页面不一致，取消本次下载
       alert("草稿在下载期间又有改动，本次下载已取消，请重新下载。");
@@ -607,10 +612,12 @@ downloadBtn.addEventListener("click", async () => {
     a.click();
     URL.revokeObjectURL(url);
   } catch (e) {
-    if (epoch !== state.epoch || rev !== state.rev) return; // 旧草稿 / 旧修订的失败不影响当前提示
-    alert(e.errors.join("\n"));
+    // 重新导入后的旧下载：静默；同草稿改动后的旧失败也不提示（已由改动后的取消路径处理）
+    if (seq !== exportSeq || epoch !== state.epoch || rev !== state.rev) return;
+    alert(e.errors.join("\n")); // 草稿与预览均未变：失败后按钮恢复，可直接重试
   } finally {
+    if (seq !== exportSeq) return; // 序号已被重新导入或新下载接管：等待状态归当前下载，旧收尾不得触碰
     state.exporting = false;
-    syncToolbar();
+    syncToolbar(); // 按当前草稿与预览状态恢复（仍未追上 / 仍有失效引用则继续禁用）
   }
 });
